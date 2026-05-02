@@ -27,3 +27,9 @@ Add comments to surface non-obvious information — not to describe what code do
 - `// POINT OF FAILURE:` — marks where the code will crash or silently misbehave if an assumption is violated or an unexpected value arrives. Note what breaks and consider whether a guard, fallback, or log should be added.
 
 For observability: use `console.warn` for recoverable unexpected states and `console.error` for conditions that will cause incorrect behavior. Prefer structured messages that include the unexpected value (e.g. `console.warn('dropInterval out of range', dropInterval)`).
+
+## Git & GitHub
+
+Repository: https://github.com/DanielStar8868/csgo-clone
+
+Commit after each meaningful feature milestone with a clear, conventional commit message (`feat:`, `fix:`, `refactor:`, `init:`). This allows reverting to stable states between features. Do not batch unrelated changes into one commit.
