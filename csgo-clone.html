@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>de_lofi — CS:GO but make it weird</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #000; display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100vh; font-family: 'Courier New', monospace; overflow: hidden; }
+  #gameCanvas {
+    /* IMPORTANT: CSS scaling keeps the chunky lo-fi pixel look. Do not remove image-rendering. */
+    width: 960px;
+    height: 600px;
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    cursor: none;
+    display: block;
+  }
+  #overlay {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(0,0,0,0.85); color: #c8ff00; font-family: 'Courier New', monospace;
+    z-index: 10;
+  }
+  #overlay h1 { font-size: 3rem; letter-spacing: 0.3em; margin-bottom: 0.5rem; text-shadow: 0 0 20px #c8ff00; }
+  #overlay p  { font-size: 1rem; color: #aaa; margin: 0.3rem 0; }
+  #overlay .sub { font-size: 0.8rem; color: #555; margin-top: 1.5rem; }
+  #startBtn {
+    margin-top: 2rem; padding: 0.8rem 3rem; background: #c8ff00; color: #000;
+    border: none; font-family: 'Courier New', monospace; font-size: 1.2rem;
+    font-weight: bold; cursor: pointer; letter-spacing: 0.2em;
+  }
+  #startBtn:hover { background: #fff; }
+  #deathScreen {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(180,0,0,0.6); color: #fff; font-family: 'Courier New', monospace; z-index: 9;
+  }
+  #deathScreen h2 { font-size: 4rem; letter-spacing: 0.4em; color: #ff3333; text-shadow: 0 0 30px #ff0000; }
+  #deathScreen p  { font-size: 1.2rem; color: #ffaaaa; margin-top: 1rem; }
+  #winScreen {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    display: none; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(0,120,0,0.6); color: #fff; font-family: 'Courier New', monospace; z-index: 9;
+  }
+  #winScreen h2 { font-size: 3rem; letter-spacing: 0.3em; color: #00ff88; text-shadow: 0 0 30px #00ff00; }
+  #winScreen p  { font-size: 1.1rem; color: #aaffcc; margin-top: 1rem; }
+</style>
+</head>
+<body>
+
+<canvas id="gameCanvas" width="320" height="200"></canvas>
+
+<div id="overlay">
+  <h1>de_lofi</h1>
+  <p>A weird little shooter</p>
+  <p style="color:#c8ff00;margin-top:1rem;">WASD · Mouse · Click to shoot · R reload · Space jump · Ctrl crouch</p>
+  <p class="sub">Eliminate all enemy bots to win the round.</p>
+  <button id="startBtn">PLAY</button>
+</div>
+<div id="deathScreen">
+  <h2>YOU DIED</h2>
+  <p id="deathMsg">respawning...</p>
+</div>
+<div id="winScreen">
+  <h2>ROUND WIN</h2>
+  <p id="winMsg">all enemies eliminated</p>
+</div>
+
+<script>
+'use strict';
+
+// ─── CANVAS ────────────────────────────────────────────────────────────────
+const canvas = document.getElementById('gameCanvas');
+const ctx    = canvas.getContext('2d');
+const W = canvas.width;   // 320
+const H = canvas.height;  // 200
+
+// ─── MAP ───────────────────────────────────────────────────────────────────
+// 0 = empty, 1 = wall-grey, 2 = wall-red (T-side), 3 = wall-blue (CT-side)
+// ASSUMPTION: MAP is exactly 16 cols × 16 rows; raycaster reads MAP[row][col]
+const MAP_ROWS = 16, MAP_COLS = 16;
+const MAP = [
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,2,2,0,0,0,0,0,0,0,0,3,3,0,1],
+  [1,0,2,0,0,0,0,0,0,0,0,0,0,3,0,1],
+  [1,0,0,0,1,1,0,0,0,0,1,1,0,0,0,1],
+  [1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,1],
+  [1,0,0,0,0,0,0,1,1,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,0,0,0,0,0,0,1,1,0,0,0,0,0,0,1],
+  [1,0,0,0,1,0,0,0,0,0,0,1,0,0,0,1],
+  [1,0,0,0,1,1,0,0,0,0,1,1,0,0,0,1],
+  [1,0,2,0,0,0,0,0,0,0,0,0,0,3,0,1],
+  [1,0,2,2,0,0,0,0,0,0,0,0,3,3,0,1],
+  [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1],
+  [1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],
+];
+
+function isSolid(mx, my) {
+  const col = Math.floor(mx), row = Math.floor(my);
+  if (col < 0 || col >= MAP_COLS || row < 0 || row >= MAP_ROWS) return true;
+  return MAP[row][col] !== 0;
+}
+
+// ─── STATE ─────────────────────────────────────────────────────────────────
+let player, pistol, bots, killfeed, roundTimer, gameState;
+
+// gameState: 'start' | 'playing' | 'dead' | 'win'
+function initGame() {
+  gameState = 'playing';
+
+  player = {
+    x: 1.5, y: 14.5,       // spawn bottom-left open area
+    angle: -Math.PI / 2,   // facing up
+    health: 100,
+    speed: 0.04,
+    turnSpeed: 0.002,
+    fov: Math.PI / 3,      // 60°
+    // jump state
+    jumpZ: 0, jumpVel: 0, jumping: false,
+    // crouch
+    crouching: false,
+    // invincibility after hit
+    hitFlash: 0,
+  };
+
+  pistol = {
+    ammo: 12, reserve: 36,
+    fireRate: 400,       // ms between shots
+    reloadTime: 1800,    // ms
+    lastFired: 0,
+    reloading: false,
+    reloadStart: 0,
+    recoil: 0,           // visual kick (0–1)
+    muzzleFlash: 0,      // frames remaining
+  };
+
+  // Goofy bot names
+  const names = ['Bot_Kevin','Bot_Stacy','Bot_Jerome','Bot_Linda','Bot_Chad'];
+  bots = [
+    makBot(14.5, 1.5,  Math.PI/2,  'enemy', names[0]),
+    makBot(13.5, 3.5,  Math.PI/2,  'enemy', names[1]),
+    makBot(1.5,  1.5,  -Math.PI/2, 'enemy', names[2]),
+    makBot(8.0,  7.5,  0,          'enemy', names[3]),
+    makBot(2.5,  7.5,  0,          'friendly', 'Ally_Dave'),
+    makBot(2.5,  8.5,  0,          'friendly', 'Ally_Pam'),
+  ];
+
+  killfeed = [];
+  roundTimer = 120; // seconds
+}
+
+function makBot(x, y, angle, team, name) {
+  return {
+    x, y, angle,
+    team,        // 'enemy' | 'friendly'
+    name,
+    health: 100,
+    state: 'patrol',    // patrol | alert | chase | shoot | dead
+    waypoints: randomWaypoints(x, y),
+    wpIdx: 0,
+    shootCooldown: 0,
+    alertTimer: 0,
+    speed: 0.015 + Math.random() * 0.008,
+    accuracy: 0.15 + Math.random() * 0.2, // spread radians
+    dist: 0,           // distance to player (computed each frame)
+    visAngle: 0,       // angle to player
+  };
+}
+
+function randomWaypoints(sx, sy) {
+  const pts = [];
+  for (let i = 0; i < 4; i++) {
+    let x, y, tries = 0;
+    do { x = 1 + Math.random() * 14; y = 1 + Math.random() * 14; tries++; }
+    while (isSolid(x, y) && tries < 20);
+    pts.push({x, y});
+  }
+  return pts;
+}
+
+// ─── INPUT ──────────────────────────────────────────────────────────────────
+const keys = {};
+let mouseDX = 0;
+let pointerLocked = false;
+let mouseFireThisFrame = false;
+
+document.addEventListener('keydown', e => { keys[e.code] = true; });
+document.addEventListener('keyup',   e => { keys[e.code] = false; });
+
+document.addEventListener('mousemove', e => {
+  if (pointerLocked) mouseDX += e.movementX;
+});
+
+document.addEventListener('mousedown', e => {
+  if (pointerLocked && e.button === 0) mouseFireThisFrame = true;
+});
+
+document.addEventListener('pointerlockchange', () => {
+  pointerLocked = document.pointerLockElement === canvas;
+});
+
+document.getElementById('startBtn').addEventListener('click', () => {
+  document.getElementById('overlay').style.display = 'none';
+  initGame();
+  canvas.requestPointerLock();
+  requestAnimationFrame(loop);
+});
+
+canvas.addEventListener('click', () => {
+  if (gameState === 'playing' && !pointerLocked) canvas.requestPointerLock();
+});
+
+document.addEventListener('keydown', e => {
+  if (e.code === 'KeyR' && gameState === 'playing') tryReload();
+});
+
+// ─── AUDIO ──────────────────────────────────────────────────────────────────
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+function playShot() {
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.12, audioCtx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (d.length * 0.15));
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const gain = audioCtx.createGain();
+  gain.gain.setValueAtTime(0.4, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.12);
+  src.connect(gain); gain.connect(audioCtx.destination);
+  src.start();
+}
+
+function playHit() {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.frequency.value = 800;
+  osc.type = 'square';
+  gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.08);
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.start(); osc.stop(audioCtx.currentTime + 0.08);
+}
+
+function playDie() {
+  const osc = audioCtx.createOscillator();
+  const gain = audioCtx.createGain();
+  osc.frequency.setValueAtTime(400, audioCtx.currentTime);
+  osc.frequency.linearRampToValueAtTime(80, audioCtx.currentTime + 0.5);
+  osc.type = 'sawtooth';
+  gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+  gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+  osc.connect(gain); gain.connect(audioCtx.destination);
+  osc.start(); osc.stop(audioCtx.currentTime + 0.5);
+}
+
+function playFootstep() {
+  const buf = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.04, audioCtx.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (d.length * 0.3));
+  const src = audioCtx.createBufferSource();
+  src.buffer = buf;
+  const gain = audioCtx.createGain();
+  gain.gain.value = 0.08;
+  src.connect(gain); gain.connect(audioCtx.destination);
+  src.start();
+}
+
+let stepTimer = 0;
+
+// ─── RAYCASTING ─────────────────────────────────────────────────────────────
+// DISTILLED: DDA raycaster. For each screen column, cast a ray from the player.
+// Advance the ray step-by-step on the grid until hitting a wall. The distance
+// determines strip height (closer = taller). Side indicates N/S vs E/W face for shading.
+const zBuffer = new Float32Array(W); // stores corrected dist per column for sprite clipping
+
+function castRays() {
+  for (let col = 0; col < W; col++) {
+    // Ray direction
+    const camX = (2 * col / W) - 1; // -1 (left) to +1 (right)
+    const rayAngle = player.angle + Math.atan(camX * Math.tan(player.fov / 2));
+    const rdx = Math.cos(rayAngle);
+    const rdy = Math.sin(rayAngle);
+
+    let mapX = Math.floor(player.x);
+    let mapY = Math.floor(player.y);
+
+    // Length of ray to next x or y boundary
+    const deltaDistX = Math.abs(1 / rdx) || 1e30;
+    const deltaDistY = Math.abs(1 / rdy) || 1e30;
+
+    let sideDistX, sideDistY, stepX, stepY;
+    if (rdx < 0) { stepX = -1; sideDistX = (player.x - mapX) * deltaDistX; }
+    else          { stepX =  1; sideDistX = (mapX + 1 - player.x) * deltaDistX; }
+    if (rdy < 0)  { stepY = -1; sideDistY = (player.y - mapY) * deltaDistY; }
+    else          { stepY =  1; sideDistY = (mapY + 1 - player.y) * deltaDistY; }
+
+    let side = 0, hit = false, tile = 0;
+    for (let depth = 0; depth < 32 && !hit; depth++) {
+      if (sideDistX < sideDistY) { sideDistX += deltaDistX; mapX += stepX; side = 0; }
+      else                        { sideDistY += deltaDistY; mapY += stepY; side = 1; }
+      if (mapY >= 0 && mapY < MAP_ROWS && mapX >= 0 && mapX < MAP_COLS && MAP[mapY][mapX] !== 0) {
+        hit = true; tile = MAP[mapY][mapX];
+      }
+    }
+
+    // Perpendicular distance (avoids fisheye)
+    const perpDist = side === 0 ? (sideDistX - deltaDistX) : (sideDistY - deltaDistY);
+    zBuffer[col] = perpDist;
+
+    const lineH = Math.min(H * 2, Math.floor(H / (perpDist + 0.0001)));
+    const drawStart = Math.max(0, Math.floor((H - lineH) / 2));
+    const drawEnd   = Math.min(H - 1, Math.floor((H + lineH) / 2));
+
+    // Wall color based on tile type + side shading + distance fog
+    let r, g, b;
+    if (tile === 2)      { r = 180; g = 60;  b = 60; }  // red wall
+    else if (tile === 3) { r = 60;  g = 80;  b = 180; } // blue wall
+    else                 { r = 120; g = 120; b = 120; } // grey wall
+    if (side === 1) { r = r * 0.65 | 0; g = g * 0.65 | 0; b = b * 0.65 | 0; } // N/S darker
+    // Fog
+    const fog = Math.min(1, perpDist / 10);
+    r = (r * (1 - fog)) | 0; g = (g * (1 - fog)) | 0; b = (b * (1 - fog)) | 0;
+
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.fillRect(col, drawStart, 1, drawEnd - drawStart);
+
+    // Floor below wall
+    ctx.fillStyle = '#2a2a1e';
+    ctx.fillRect(col, drawEnd, 1, H - drawEnd);
+  }
+}
+
+function drawCeiling() {
+  ctx.fillStyle = '#1a1a2e';
+  ctx.fillRect(0, 0, W, H / 2);
+}
+
+// ─── SPRITES (BOTS) ─────────────────────────────────────────────────────────
+// DISTILLED: Billboard sprite rendering. Project each bot's world position onto
+// the screen, then draw a vertical strip per column — skipping columns blocked by
+// a closer wall (using zBuffer).
+function drawSprites() {
+  // Sort bots farthest to nearest (painter's order)
+  const visible = bots.filter(b => b.state !== 'dead').map(b => {
+    const dx = b.x - player.x, dy = b.y - player.y;
+    return { bot: b, dist2: dx*dx + dy*dy };
+  }).sort((a, b) => b.dist2 - a.dist2);
+
+  for (const { bot } of visible) {
+    const dx = bot.x - player.x;
+    const dy = bot.y - player.y;
+
+    // Transform into camera space
+    const invDet = 1 / (Math.cos(player.angle) * (-Math.sin(player.angle)) - (-Math.sin(player.angle)) * Math.cos(player.angle));
+    // DISTILLED: use the rotation-only camera matrix (fov baked via atan in raycaster).
+    // Here we use a simpler direct angle approach.
+    const sprAngle = Math.atan2(dy, dx) - player.angle;
+    // Normalize angle to [-PI, PI]
+    let sa = ((sprAngle % (Math.PI*2)) + Math.PI*3) % (Math.PI*2) - Math.PI;
+
+    // If sprite is behind player, skip
+    const dist = Math.sqrt(dx*dx + dy*dy);
+    if (Math.cos(sa) < 0) continue;
+    if (dist < 0.3) continue;
+
+    // Screen x center of sprite
+    const screenX = Math.floor((0.5 + Math.tan(sa) / (2 * Math.tan(player.fov / 2))) * W);
+
+    const sprH = Math.min(H * 2, Math.floor(H / dist));
+    const sprW = sprH;
+
+    const startX = Math.max(0, Math.floor(screenX - sprW / 2));
+    const endX   = Math.min(W - 1, Math.floor(screenX + sprW / 2));
+    const startY = Math.max(0, Math.floor((H - sprH) / 2));
+    const endY   = Math.min(H - 1, Math.floor((H + sprH) / 2));
+
+    const isEnemy = bot.team === 'enemy';
+
+    for (let sx = startX; sx <= endX; sx++) {
+      // Only draw if this column isn't blocked by a wall
+      if (dist >= zBuffer[sx]) continue;
+
+      // Simple block figure: head + body with team color
+      const tx = (sx - startX) / sprW; // 0..1 across sprite
+      for (let sy = startY; sy <= endY; sy++) {
+        const ty = (sy - startY) / sprH; // 0..1 top to bottom
+
+        // Skip transparent regions (arms area edges)
+        if (tx < 0.2 || tx > 0.8) {
+          if (ty < 0.35 || ty > 0.75) continue; // body only in mid
+        }
+
+        let pr, pg, pb;
+        if (ty < 0.28) {
+          // Head: skin tone
+          pr = 220; pg = 180; pb = 140;
+          // Eyes
+          if (ty > 0.15 && ty < 0.22 && ((tx > 0.3 && tx < 0.4) || (tx > 0.6 && tx < 0.7))) {
+            pr = 10; pg = 10; pb = 10;
+          }
+        } else if (ty < 0.32) {
+          // Neck
+          pr = 200; pg = 160; pb = 120;
+        } else {
+          // Body: team color
+          if (isEnemy) { pr = 180; pg = 40; pb = 40; }
+          else          { pr = 40;  pg = 80; pb = 200; }
+        }
+
+        // Fog
+        const fog = Math.min(1, dist / 10);
+        pr = (pr * (1 - fog * 0.8)) | 0;
+        pg = (pg * (1 - fog * 0.8)) | 0;
+        pb = (pb * (1 - fog * 0.8)) | 0;
+
+        // POINT OF FAILURE: sx/sy must stay in canvas bounds. Clamped above.
+        ctx.fillStyle = `rgb(${pr},${pg},${pb})`;
+        ctx.fillRect(sx, sy, 1, 1);
+      }
+    }
+
+    // Health bar above sprite (only enemies)
+    if (isEnemy && sprH > 8) {
+      const barW = Math.max(4, sprW * 0.6) | 0;
+      const barX = Math.max(0, screenX - barW / 2) | 0;
+      const barY = Math.max(0, startY - 4);
+      const hpFrac = bot.health / 100;
+      ctx.fillStyle = '#333';
+      ctx.fillRect(barX, barY, barW, 2);
+      ctx.fillStyle = hpFrac > 0.5 ? '#00ff44' : hpFrac > 0.25 ? '#ffaa00' : '#ff2222';
+      ctx.fillRect(barX, barY, Math.ceil(barW * hpFrac), 2);
+    }
+
+    // Name tag
+    if (sprH > 12) {
+      ctx.save();
+      ctx.font = '5px Courier New';
+      ctx.fillStyle = isEnemy ? '#ff8888' : '#88aaff';
+      ctx.textAlign = 'center';
+      ctx.fillText(bot.name, Math.max(3, Math.min(W-3, screenX)), Math.max(4, startY - 7));
+      ctx.restore();
+    }
+  }
+}
+
+// ─── WEAPON RENDER ──────────────────────────────────────────────────────────
+function drawWeapon(now) {
+  const reloading = pistol.reloading;
+  const reloadFrac = reloading ? Math.min(1, (now - pistol.reloadStart) / pistol.reloadTime) : 0;
+
+  // Bob from jump or movement
+  const bob = player.jumping ? Math.sin(now / 80) * 3 : (keys['KeyW'] || keys['KeyS'] ? Math.sin(now / 120) * 2 : 0);
+
+  // Recoil kick: gun goes down-right momentarily
+  const recoilY = pistol.recoil * 12;
+  const recoilX = pistol.recoil * 6;
+
+  // Reload: gun dips down
+  const reloadDip = reloadFrac < 0.5 ? reloadFrac * 20 : (1 - reloadFrac) * 20;
+
+  const gx = W - 60 + recoilX;
+  const gy = H - 30 + recoilY + bob + reloadDip;
+
+  // Pistol body
+  ctx.fillStyle = '#444';
+  ctx.fillRect(gx, gy, 28, 10);
+  // Barrel
+  ctx.fillStyle = '#333';
+  ctx.fillRect(gx - 10, gy + 2, 14, 4);
+  // Grip
+  ctx.fillStyle = '#555';
+  ctx.fillRect(gx + 6, gy + 10, 10, 12);
+  // Trigger guard
+  ctx.fillStyle = '#333';
+  ctx.fillRect(gx + 4, gy + 9, 2, 5);
+  ctx.fillRect(gx + 4, gy + 13, 8, 2);
+  // Slide
+  ctx.fillStyle = '#666';
+  ctx.fillRect(gx, gy, 20, 4);
+  // Sight
+  ctx.fillStyle = '#c8ff00';
+  ctx.fillRect(gx + 16, gy - 2, 2, 2);
+
+  // Muzzle flash
+  if (pistol.muzzleFlash > 0) {
+    ctx.fillStyle = `rgba(255,220,80,${pistol.muzzleFlash / 3})`;
+    ctx.fillRect(gx - 18, gy, 10, 6);
+    ctx.fillStyle = `rgba(255,255,200,${pistol.muzzleFlash / 3})`;
+    ctx.fillRect(gx - 14, gy + 1, 5, 4);
+  }
+
+  pistol.recoil = Math.max(0, pistol.recoil - 0.08);
+  if (pistol.muzzleFlash > 0) pistol.muzzleFlash--;
+}
+
+// ─── HUD ────────────────────────────────────────────────────────────────────
+function drawHUD(now) {
+  // Crosshair
+  const cx = W / 2 | 0, cy = H / 2 | 0;
+  const spread = pistol.recoil * 6 | 0;
+  ctx.fillStyle = '#c8ff00';
+  ctx.fillRect(cx - 6 - spread, cy, 4, 1);
+  ctx.fillRect(cx + 3 + spread, cy, 4, 1);
+  ctx.fillRect(cx, cy - 6 - spread, 1, 4);
+  ctx.fillRect(cx, cy + 3 + spread, 1, 4);
+  // Center dot
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(cx, cy, 1, 1);
+
+  // Health bar
+  ctx.fillStyle = '#111';
+  ctx.fillRect(2, H - 10, 50, 6);
+  const hpFrac = player.health / 100;
+  ctx.fillStyle = hpFrac > 0.5 ? '#00dd44' : hpFrac > 0.25 ? '#ffaa00' : '#ff2222';
+  ctx.fillRect(2, H - 10, Math.ceil(50 * hpFrac), 6);
+  ctx.fillStyle = '#fff';
+  ctx.font = '5px Courier New';
+  ctx.textAlign = 'left';
+  ctx.fillText(`HP ${player.health}`, 2, H - 2);
+
+  // Ammo
+  ctx.textAlign = 'right';
+  const ammoColor = pistol.ammo === 0 ? '#ff4444' : '#c8ff00';
+  ctx.fillStyle = ammoColor;
+  if (pistol.reloading) {
+    const p = Math.min(1, (now - pistol.reloadStart) / pistol.reloadTime);
+    ctx.fillText(`RELOADING ${Math.floor(p * 100)}%`, W - 2, H - 2);
+  } else {
+    ctx.fillText(`${pistol.ammo} / ${pistol.reserve}`, W - 2, H - 2);
+  }
+
+  // Round timer
+  ctx.textAlign = 'center';
+  ctx.fillStyle = roundTimer < 20 ? '#ff4444' : '#aaa';
+  ctx.fillText(`${Math.ceil(roundTimer)}s`, W / 2, 8);
+
+  // Kill feed
+  ctx.textAlign = 'left';
+  killfeed.forEach((entry, i) => {
+    const alpha = Math.min(1, entry.ttl / 2);
+    ctx.fillStyle = `rgba(255,200,200,${alpha})`;
+    ctx.fillText(entry.msg, 2, 14 + i * 8);
+  });
+
+  // Hit indicator (screen flash)
+  if (player.hitFlash > 0) {
+    ctx.fillStyle = `rgba(255,0,0,${player.hitFlash * 0.25})`;
+    ctx.fillRect(0, 0, W, H);
+    player.hitFlash = Math.max(0, player.hitFlash - 0.12);
+  }
+
+  // Minimap (top-left small)
+  drawMinimap();
+}
+
+function drawMinimap() {
+  const S = 3, ox = W - MAP_COLS * S - 2, oy = 2;
+  for (let row = 0; row < MAP_ROWS; row++) {
+    for (let col = 0; col < MAP_COLS; col++) {
+      const t = MAP[row][col];
+      if (t === 0) continue;
+      if (t === 1) ctx.fillStyle = 'rgba(150,150,150,0.6)';
+      else if (t === 2) ctx.fillStyle = 'rgba(180,60,60,0.6)';
+      else ctx.fillStyle = 'rgba(60,80,180,0.6)';
+      ctx.fillRect(ox + col * S, oy + row * S, S - 1, S - 1);
+    }
+  }
+  // Player dot
+  ctx.fillStyle = '#c8ff00';
+  ctx.fillRect(ox + player.x * S - 1, oy + player.y * S - 1, 3, 3);
+  // Bot dots
+  bots.forEach(b => {
+    if (b.state === 'dead') return;
+    ctx.fillStyle = b.team === 'enemy' ? '#ff4444' : '#4488ff';
+    ctx.fillRect(ox + b.x * S - 1, oy + b.y * S - 1, 2, 2);
+  });
+}
+
+// ─── PLAYER UPDATE ──────────────────────────────────────────────────────────
+function updatePlayer(dt, now) {
+  // Mouse look
+  player.angle += mouseDX * player.turnSpeed;
+  mouseDX = 0;
+
+  const speed = player.crouching ? player.speed * 0.5 : player.speed;
+
+  // Movement
+  const forward = (keys['KeyW'] ? 1 : 0) - (keys['KeyS'] ? 1 : 0);
+  const strafe  = (keys['KeyD'] ? 1 : 0) - (keys['KeyA'] ? 1 : 0);
+
+  const moveX = (Math.cos(player.angle) * forward + Math.cos(player.angle + Math.PI/2) * strafe) * speed;
+  const moveY = (Math.sin(player.angle) * forward + Math.sin(player.angle + Math.PI/2) * strafe) * speed;
+
+  // Collision: separate X and Y axes
+  if (!isSolid(player.x + moveX, player.y))       player.x += moveX;
+  if (!isSolid(player.x,         player.y + moveY)) player.y += moveY;
+
+  // Footstep sound
+  if (forward !== 0 || strafe !== 0) {
+    stepTimer += dt;
+    if (stepTimer > (player.crouching ? 600 : 350)) { playFootstep(); stepTimer = 0; }
+  } else {
+    stepTimer = 0;
+  }
+
+  // Jump
+  if (keys['Space'] && !player.jumping) {
+    player.jumping = true;
+    player.jumpVel = 5;
+  }
+  if (player.jumping) {
+    player.jumpZ += player.jumpVel * dt * 0.003;
+    player.jumpVel -= 18 * dt * 0.003;
+    if (player.jumpZ <= 0) { player.jumpZ = 0; player.jumpVel = 0; player.jumping = false; }
+  }
+
+  // Crouch
+  player.crouching = !!keys['ControlLeft'] || !!keys['ControlRight'];
+
+  // Shoot
+  if (mouseFireThisFrame) tryFire(now);
+  mouseFireThisFrame = false;
+}
+
+function tryFire(now) {
+  if (pistol.reloading) return;
+  if (pistol.ammo <= 0)  { tryReload(); return; }
+  if (now - pistol.lastFired < pistol.fireRate) return;
+
+  pistol.ammo--;
+  pistol.lastFired = now;
+  pistol.recoil = 1;
+  pistol.muzzleFlash = 3;
+  playShot();
+
+  // Hitscan: cast a ray and check bot hits
+  const spread = 0.03;
+  const shotAngle = player.angle + (Math.random() - 0.5) * spread;
+  const rdx = Math.cos(shotAngle), rdy = Math.sin(shotAngle);
+
+  // Check each enemy bot for intersection
+  for (const bot of bots) {
+    if (bot.team !== 'enemy' || bot.state === 'dead') continue;
+    // Simple cylinder hit: check if ray passes within 0.35 units of bot center
+    const ex = bot.x - player.x, ey = bot.y - player.y;
+    const t = ex * rdx + ey * rdy;
+    if (t < 0.3) continue;
+    const closest2 = (ex*ex + ey*ey) - t*t;
+    if (closest2 < 0.35 * 0.35) {
+      // Wall between player and bot?
+      if (hasLOS(player.x, player.y, bot.x, bot.y)) {
+        damageBot(bot, 34, now);
+        playHit();
+        break; // pistol hits one target per shot
+      }
+    }
+  }
+
+  if (pistol.ammo === 0) tryReload();
+}
+
+function tryReload() {
+  if (pistol.reloading) return;
+  if (pistol.reserve <= 0) return;
+  if (pistol.ammo === 12) return;
+  pistol.reloading = true;
+  pistol.reloadStart = performance.now();
+}
+
+function updateReload(now) {
+  if (!pistol.reloading) return;
+  if (now - pistol.reloadStart >= pistol.reloadTime) {
+    const needed = 12 - pistol.ammo;
+    const give = Math.min(needed, pistol.reserve);
+    pistol.ammo += give;
+    pistol.reserve -= give;
+    pistol.reloading = false;
+  }
+}
+
+function damageBot(bot, dmg, now) {
+  bot.health -= dmg;
+  bot.state = 'alert';
+  bot.alertTimer = 3;
+  if (bot.health <= 0) {
+    bot.health = 0;
+    bot.state = 'dead';
+    playDie();
+    addKill(`You killed ${bot.name}`);
+  }
+}
+
+function addKill(msg) {
+  killfeed.unshift({ msg, ttl: 5 });
+  if (killfeed.length > 4) killfeed.pop();
+}
+
+// ─── LINE OF SIGHT ──────────────────────────────────────────────────────────
+function hasLOS(x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  const steps = Math.ceil(dist / 0.25);
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (isSolid(x1 + dx*t, y1 + dy*t)) return false;
+  }
+  return true;
+}
+
+// ─── BOT AI ─────────────────────────────────────────────────────────────────
+function updateBots(dt, now) {
+  for (const bot of bots) {
+    if (bot.state === 'dead') continue;
+
+    const dx = player.x - bot.x, dy = player.y - bot.y;
+    bot.dist = Math.sqrt(dx*dx + dy*dy);
+    bot.visAngle = Math.atan2(dy, dx);
+
+    if (bot.team === 'friendly') {
+      updateFriendlyBot(bot, dt);
+      continue;
+    }
+
+    // Enemy AI state machine
+    const canSee = bot.dist < 10 && hasLOS(bot.x, bot.y, player.x, player.y);
+
+    switch (bot.state) {
+      case 'patrol':
+        if (canSee) { bot.state = 'alert'; bot.alertTimer = 0.5; }
+        else moveToWaypoint(bot, dt);
+        break;
+      case 'alert':
+        bot.alertTimer -= dt / 1000;
+        if (canSee) { bot.state = 'chase'; }
+        else if (bot.alertTimer <= 0) { bot.state = 'patrol'; }
+        break;
+      case 'chase':
+        if (!canSee && bot.dist > 2) { bot.state = 'alert'; bot.alertTimer = 3; break; }
+        if (bot.dist < 4 && canSee) { bot.state = 'shoot'; break; }
+        moveToward(bot, player.x, player.y, dt);
+        break;
+      case 'shoot':
+        // Face player
+        bot.angle = bot.visAngle;
+        if (!canSee || bot.dist > 7) { bot.state = 'chase'; break; }
+        // Shoot at player
+        bot.shootCooldown -= dt;
+        if (bot.shootCooldown <= 0) {
+          botShoot(bot, now);
+          bot.shootCooldown = 800 + Math.random() * 600;
+        }
+        // Strafe a bit
+        const strafeDir = Math.cos(now / 1200) > 0 ? 1 : -1;
+        const sa = bot.angle + Math.PI/2;
+        const sx = Math.cos(sa) * bot.speed * strafeDir * dt;
+        const sy = Math.sin(sa) * bot.speed * strafeDir * dt;
+        if (!isSolid(bot.x + sx, bot.y)) bot.x += sx;
+        if (!isSolid(bot.x, bot.y + sy)) bot.y += sy;
+        break;
+    }
+  }
+}
+
+function updateFriendlyBot(bot, dt) {
+  // Follow player loosely
+  const dist = Math.sqrt((player.x - bot.x)**2 + (player.y - bot.y)**2);
+  if (dist > 3) moveToward(bot, player.x, player.y, dt);
+  else {
+    // Wander nearby
+    moveToWaypoint(bot, dt);
+    if (bot.dist < 2) bot.wpIdx = (bot.wpIdx + 1) % bot.waypoints.length;
+  }
+}
+
+function moveToWaypoint(bot, dt) {
+  const wp = bot.waypoints[bot.wpIdx];
+  const dx = wp.x - bot.x, dy = wp.y - bot.y;
+  const d = Math.sqrt(dx*dx + dy*dy);
+  if (d < 0.3) { bot.wpIdx = (bot.wpIdx + 1) % bot.waypoints.length; return; }
+  moveToward(bot, wp.x, wp.y, dt);
+}
+
+function moveToward(bot, tx, ty, dt) {
+  const dx = tx - bot.x, dy = ty - bot.y;
+  const d = Math.sqrt(dx*dx + dy*dy) || 1;
+  const nx = dx/d, ny = dy/d;
+  const step = bot.speed * dt;
+  bot.angle = Math.atan2(dy, dx);
+  const mx = nx * step, my = ny * step;
+  if (!isSolid(bot.x + mx, bot.y)) bot.x += mx;
+  if (!isSolid(bot.x, bot.y + my)) bot.y += my;
+}
+
+function botShoot(bot, now) {
+  if (gameState !== 'playing') return;
+  // Miss with inaccuracy
+  const spread = bot.accuracy;
+  const shotAngle = bot.visAngle + (Math.random() - 0.5) * spread;
+  const rdx = Math.cos(shotAngle), rdy = Math.sin(shotAngle);
+
+  // Check if shot hits player (cylinder radius 0.3)
+  const ex = player.x - bot.x, ey = player.y - bot.y;
+  const t = ex*rdx + ey*rdy;
+  if (t > 0.1) {
+    const closest2 = (ex*ex + ey*ey) - t*t;
+    if (closest2 < 0.3 * 0.3 && hasLOS(bot.x, bot.y, player.x, player.y)) {
+      player.health -= 22;
+      player.hitFlash = 1;
+      playHit();
+      if (player.health <= 0) {
+        player.health = 0;
+        triggerDeath();
+      }
+    }
+  }
+}
+
+// ─── ROUND LOGIC ────────────────────────────────────────────────────────────
+function checkRound() {
+  const enemiesAlive = bots.filter(b => b.team === 'enemy' && b.state !== 'dead').length;
+  if (enemiesAlive === 0) {
+    gameState = 'win';
+    document.getElementById('winScreen').style.display = 'flex';
+    document.getElementById('winMsg').textContent = 'All enemies eliminated. Press F5 to play again.';
+    document.exitPointerLock();
+  }
+}
+
+function triggerDeath() {
+  gameState = 'dead';
+  playDie();
+  const ds = document.getElementById('deathScreen');
+  ds.style.display = 'flex';
+  document.exitPointerLock();
+  let countdown = 4;
+  document.getElementById('deathMsg').textContent = `respawning in ${countdown}...`;
+  const interval = setInterval(() => {
+    countdown--;
+    if (countdown <= 0) {
+      clearInterval(interval);
+      ds.style.display = 'none';
+      initGame();
+      canvas.requestPointerLock();
+    } else {
+      document.getElementById('deathMsg').textContent = `respawning in ${countdown}...`;
+    }
+  }, 1000);
+}
+
+// ─── GAME LOOP ──────────────────────────────────────────────────────────────
+let lastTime = 0;
+
+function loop(now) {
+  if (gameState !== 'playing') return;
+  const dt = now - lastTime;
+  lastTime = now;
+
+  roundTimer -= dt / 1000;
+  if (roundTimer <= 0) { roundTimer = 0; triggerDeath(); return; }
+
+  // Kill feed TTL
+  killfeed.forEach(e => e.ttl -= dt / 1000);
+  killfeed = killfeed.filter(e => e.ttl > 0);
+
+  // Update
+  updatePlayer(dt, now);
+  updateReload(now);
+  updateBots(dt, now);
+  checkRound();
+
+  // Draw
+  drawCeiling();
+  castRays();
+  drawSprites();
+  drawWeapon(now);
+  drawHUD(now);
+
+  requestAnimationFrame(loop);
+}
+
+// Kick off loop after button click (inside startBtn handler above)
+// First frame needs a lastTime baseline
+requestAnimationFrame(t => { lastTime = t; });
+</script>
+</body>
+</html>
